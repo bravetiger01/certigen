@@ -1,5 +1,6 @@
 """
 Certificate Generator - Core module with OCR-based placeholder detection
+Uses RapidOCR (lightweight, offline, no external dependencies)
 """
 
 from PIL import Image, ImageDraw, ImageFont
@@ -12,15 +13,24 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
 from dataclasses import dataclass
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List
 import re
 from pathlib import Path
 
 try:
-    import pytesseract
+    from rapidocr_onnxruntime import RapidOCR
     HAS_OCR = True
 except ImportError:
     HAS_OCR = False
+
+# Lazy load OCR engine
+_ocr_engine = None
+
+def _get_ocr():
+    global _ocr_engine
+    if _ocr_engine is None and HAS_OCR:
+        _ocr_engine = RapidOCR()
+    return _ocr_engine
 
 
 @dataclass
@@ -41,7 +51,7 @@ class CertificateGenerator:
     Generate certificates by replacing placeholder text with names from Excel/CSV.
     
     Features:
-    - OCR-based automatic placeholder detection
+    - OCR-based automatic placeholder detection (using RapidOCR - no external deps)
     - Auto-detect font color and background color
     - Auto-resize text for long names
     - Export to PNG, PDF, or ZIP
@@ -73,7 +83,6 @@ class CertificateGenerator:
         min_font_size: int = 60,
         manual_position: Optional[Tuple[int, int]] = None,
         max_text_width: Optional[int] = None,
-        tesseract_path: Optional[str] = None,
         verbose: bool = True,
     ):
         """
@@ -92,7 +101,6 @@ class CertificateGenerator:
             min_font_size: Minimum font size for long names
             manual_position: (x, y) tuple to override OCR detection
             max_text_width: Maximum width for text in pixels
-            tesseract_path: Path to Tesseract executable (for Windows)
             verbose: Print progress messages
         """
         self.template_path = template_path
@@ -109,15 +117,6 @@ class CertificateGenerator:
         self.max_text_width = max_text_width
         self.verbose = verbose
         
-        # Configure Tesseract path
-        if tesseract_path and HAS_OCR:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_path
-        elif HAS_OCR and os.name == 'nt':
-            # Default Windows path
-            default_path = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
-            if os.path.exists(default_path):
-                pytesseract.pytesseract.tesseract_cmd = default_path
-        
         # Load template and names
         self.template = Image.open(template_path).convert("RGB")
         self.names = self._load_names()
@@ -128,13 +127,13 @@ class CertificateGenerator:
         os.makedirs(output_dir, exist_ok=True)
         
         if self.verbose:
-            print(f"\n📍 Detected position: ({self.text_region.x}, {self.text_region.y})")
-            print(f"🎨 Text color: {self.text_region.text_color}")
-            print(f"🖼️ Background color: {self.text_region.bg_color}")
-            print(f"📏 Max width: {self.text_region.width}")
-            print(f"🔤 Font size: {self.text_region.detected_font_size or self.base_font_size}px")
+            print(f"\n[Position] ({self.text_region.x}, {self.text_region.y})")
+            print(f"[Text color] {self.text_region.text_color}")
+            print(f"[Background] {self.text_region.bg_color}")
+            print(f"[Max width] {self.text_region.width}px")
+            print(f"[Font size] {self.text_region.detected_font_size or self.base_font_size}px")
             if self.text_region.placeholder_box:
-                print(f"📦 Placeholder box: {self.text_region.placeholder_box}")
+                print(f"[Placeholder box] {self.text_region.placeholder_box}")
             print()
 
     def _load_names(self) -> List[str]:
@@ -147,7 +146,7 @@ class CertificateGenerator:
         return [str(name).strip() for name in df[self.name_column] if pd.notna(name)]
 
     def _detect_placeholder(self) -> TextRegion:
-        """Use OCR to find placeholder text position, with fallbacks"""
+        """Use RapidOCR to find placeholder text position, with fallbacks"""
         img_array = np.array(self.template)
         height, width = img_array.shape[:2]
         
@@ -156,54 +155,71 @@ class CertificateGenerator:
         detected_height = 100
         detected_font_size = None
         placeholder_box = None
-        found_placeholder = False
         
-        if HAS_OCR and self.manual_position is None:
+        ocr = _get_ocr()
+        if ocr is not None and self.manual_position is None:
             try:
-                ocr_data = pytesseract.image_to_data(
-                    self.template, output_type=pytesseract.Output.DICT
-                )
+                if self.verbose:
+                    print("Searching for placeholder with OCR...")
                 
-                placeholder_words = self.placeholder.lower().split()
-                matching_indices = []
+                # RapidOCR returns: (result, elapse)
+                # result is list of [bbox, text, confidence]
+                result, _ = ocr(img_array)
                 
-                for i, text in enumerate(ocr_data['text']):
-                    if text.strip() and text.strip().lower() in placeholder_words:
-                        matching_indices.append(i)
-                
-                if matching_indices:
-                    x_min = min(ocr_data['left'][i] for i in matching_indices)
-                    y_min = min(ocr_data['top'][i] for i in matching_indices)
-                    x_max = max(ocr_data['left'][i] + ocr_data['width'][i] for i in matching_indices)
-                    y_max = max(ocr_data['top'][i] + ocr_data['height'][i] for i in matching_indices)
+                if result:
+                    placeholder_words = self.placeholder.lower().split()
+                    matching_boxes = []
                     
-                    full_w = x_max - x_min
-                    full_h = y_max - y_min
-                    placeholder_box = (x_min, y_min, x_max, y_max)
+                    for item in result:
+                        bbox, text, conf = item
+                        text_lower = text.strip().lower()
+                        
+                        for word in placeholder_words:
+                            if word in text_lower or text_lower in word:
+                                x1 = int(min(p[0] for p in bbox))
+                                y1 = int(min(p[1] for p in bbox))
+                                x2 = int(max(p[0] for p in bbox))
+                                y2 = int(max(p[1] for p in bbox))
+                                matching_boxes.append((x1, y1, x2, y2, text))
+                                break
                     
-                    detected_x = x_min + full_w // 2
-                    detected_y = y_min + full_h // 2
-                    detected_width = max(full_w, int(width * 0.4))
-                    detected_height = full_h
-                    
-                    detected_font_size = self._estimate_font_size(self.placeholder, full_w)
-                    found_placeholder = True
-                    
-                    if self.verbose:
-                        print(f"✅ Found placeholder '{self.placeholder}' via OCR")
-                        print(f"   Bounding box: ({x_min}, {y_min}) to ({x_max}, {y_max})")
-                
-                if not found_placeholder and self.verbose:
-                    print(f"⚠️ Placeholder '{self.placeholder}' not found, using center")
+                    if matching_boxes:
+                        x_min = min(b[0] for b in matching_boxes)
+                        y_min = min(b[1] for b in matching_boxes)
+                        x_max = max(b[2] for b in matching_boxes)
+                        y_max = max(b[3] for b in matching_boxes)
+                        
+                        placeholder_box = (x_min, y_min, x_max, y_max)
+                        detected_x = (x_min + x_max) // 2
+                        detected_y = (y_min + y_max) // 2
+                        detected_width = max(x_max - x_min, int(width * 0.4))
+                        detected_height = y_max - y_min
+                        
+                        detected_font_size = self._estimate_font_size(
+                            self.placeholder, x_max - x_min
+                        )
+                        
+                        if self.verbose:
+                            matched = [b[4] for b in matching_boxes]
+                            print(f"Found '{self.placeholder}' -> {matched}")
+                            print(f"   Box: ({x_min}, {y_min}) to ({x_max}, {y_max})")
+                    elif self.verbose:
+                        print(f"Placeholder '{self.placeholder}' not found, using center")
+                elif self.verbose:
+                    print("No text detected, using center")
                     
             except Exception as e:
                 if self.verbose:
-                    print(f"⚠️ OCR failed: {e}")
+                    print(f"OCR failed: {e}")
+        elif ocr is None and self.manual_position is None:
+            if self.verbose:
+                print("rapidocr-onnxruntime not installed - using center")
+                print("   Tip: pip install rapidocr-onnxruntime")
         
         if self.manual_position:
             detected_x, detected_y = self.manual_position
             if self.verbose:
-                print(f"📍 Using manual position: ({detected_x}, {detected_y})")
+                print(f"Using manual position: ({detected_x}, {detected_y})")
         
         if self.max_text_width:
             detected_width = self.max_text_width
@@ -224,56 +240,46 @@ class CertificateGenerator:
         )
 
     def _estimate_font_size(self, text: str, target_width: int) -> int:
-        """Find font size that matches target width"""
-        best_size = 50
-        best_diff = float('inf')
-        
-        for size in range(10, 400):
+        """Estimate font size to match target width"""
+        for size in range(20, 300, 2):
             try:
                 font = ImageFont.truetype(self.font_path, size)
                 bbox = font.getbbox(text)
-                text_width = bbox[2] - bbox[0]
-                diff = abs(text_width - target_width)
-                
-                if diff < best_diff:
-                    best_diff = diff
-                    best_size = size
-                if text_width > target_width + 20:
-                    break
+                if bbox[2] - bbox[0] >= target_width:
+                    return size
             except Exception:
                 continue
-        
-        if self.verbose:
-            print(f"   Estimated font size: {best_size}px")
-        return best_size
+        return 100
 
     def _extract_colors(self, cx: int, cy: int, w: int, h: int) -> Tuple[Tuple[int, int, int], Tuple[int, int, int]]:
         """Extract text and background colors from region"""
         img_array = np.array(self.template)
         img_h, img_w = img_array.shape[:2]
         
-        x1, x2 = max(0, cx - w // 2), min(img_w, cx + w // 2)
-        y1, y2 = max(0, cy - h), min(img_h, cy + h)
+        x1 = max(0, cx - w // 2)
+        x2 = min(img_w, cx + w // 2)
+        y1 = max(0, cy - h)
+        y2 = min(img_h, cy + h)
         
         region = img_array[y1:y2, x1:x2]
         pixels = region.reshape(-1, 3)
         unique_colors, counts = np.unique(pixels, axis=0, return_counts=True)
-        sorted_indices = np.argsort(-counts)
+        sorted_idx = np.argsort(-counts)
         
-        bg_color = tuple(int(x) for x in unique_colors[sorted_indices[0]])
+        bg_color = tuple(int(x) for x in unique_colors[sorted_idx[0]])
         bg_array = np.array(bg_color)
         
         best_text_color = (0, 0, 0)
-        best_distance = 0
+        best_dist = 0
         
-        for idx in sorted_indices[:20]:
+        for idx in sorted_idx[:20]:
             color = unique_colors[idx]
-            distance = np.sqrt(np.sum((color - bg_array) ** 2))
-            if distance > best_distance and distance > 30:
-                best_distance = distance
+            dist = np.sqrt(np.sum((color - bg_array) ** 2))
+            if dist > best_dist and dist > 30:
+                best_dist = dist
                 best_text_color = tuple(int(x) for x in color)
         
-        if best_distance < 30:
+        if best_dist < 30:
             brightness = sum(bg_color) / 3
             best_text_color = (0, 0, 0) if brightness > 128 else (255, 255, 255)
         
@@ -337,7 +343,7 @@ class CertificateGenerator:
         img.save(output_path, "PNG", quality=95)
         
         if self.verbose:
-            print(f"[{index}/{len(self.names)}] Generated: {safe_name}_certificate.png")
+            print(f"[{index}/{len(self.names)}] {safe_name}_certificate.png")
         return output_path
 
     def generate_all(self) -> List[str]:
@@ -346,7 +352,7 @@ class CertificateGenerator:
         for idx, name in enumerate(self.names, 1):
             paths.append(self._generate_single(name, idx))
         if self.verbose:
-            print(f"\n✅ Generated {len(paths)} certificates in '{self.output_dir}'")
+            print(f"\nGenerated {len(paths)} certificates in '{self.output_dir}'")
         return paths
 
     def export_as_pdf(self, output_name: str = "certificates.pdf") -> str:
@@ -360,7 +366,7 @@ class CertificateGenerator:
         images[0].save(pdf_path, "PDF", save_all=True, append_images=images[1:])
         
         if self.verbose:
-            print(f"📄 PDF created: {pdf_path}")
+            print(f"PDF created: {pdf_path}")
         return pdf_path
 
     def zip_certificates(self, output_name: str = "certificates.zip") -> str:
@@ -372,7 +378,7 @@ class CertificateGenerator:
                 zf.write(file, file.name)
         
         if self.verbose:
-            print(f"📦 Zipped: {zip_path}")
+            print(f"Zipped: {zip_path}")
         return zip_path
 
     def email_certificates(
@@ -400,7 +406,7 @@ class CertificateGenerator:
                 server.send_message(msg)
             
             if self.verbose:
-                print(f"📧 Sent to: {recipient}")
+                print(f"Sent to: {recipient}")
 
     def upload_to_s3(self, bucket: str, access_key: str, secret_key: str, 
                      region: str = "us-east-1", prefix: str = "certificates/"):
@@ -413,7 +419,7 @@ class CertificateGenerator:
             key = f"{prefix}{file.name}"
             s3.upload_file(str(file), bucket, key)
             if self.verbose:
-                print(f"☁️ Uploaded: {key}")
+                print(f"Uploaded: {key}")
 
     def upload_to_drive(self, credentials_path: str, folder_id: Optional[str] = None):
         """Upload certificates to Google Drive"""
@@ -433,4 +439,4 @@ class CertificateGenerator:
             media = MediaFileUpload(str(file), mimetype='image/png')
             service.files().create(body=metadata, media_body=media).execute()
             if self.verbose:
-                print(f"📁 Uploaded: {file.name}")
+                print(f"Uploaded: {file.name}")
