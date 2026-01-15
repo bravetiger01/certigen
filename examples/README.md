@@ -16,6 +16,8 @@ Test files for the certigen package.
 pip install certigen
 ```
 
+No additional setup needed! OCR works out of the box.
+
 2. Run from this directory:
 ```bash
 cd examples

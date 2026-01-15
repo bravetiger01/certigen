@@ -1,6 +1,5 @@
 ⭐ If you find CertiGen useful, consider starring the repo!
 
-
 # CertiGen 🎓
 
 Automatic certificate generator with OCR-based placeholder detection. Generate hundreds of personalized certificates in seconds!
@@ -13,6 +12,7 @@ Automatic certificate generator with OCR-based placeholder detection. Generate h
 - 📄 **Multiple exports** - PNG, PDF, or ZIP
 - ☁️ **Cloud upload** - S3 and Google Drive support
 - 📧 **Email** - Send certificates directly via email
+- 🚀 **No external dependencies** - OCR works out of the box, no Tesseract needed!
 
 ## Installation
 
@@ -20,21 +20,12 @@ Automatic certificate generator with OCR-based placeholder detection. Generate h
 pip install certigen
 ```
 
-For OCR support (recommended):
+That's it! OCR is included and works offline. No external software required.
+
+For cloud upload features:
 ```bash
-pip install certigen[ocr]
+pip install certigen[cloud]
 ```
-
-For all features:
-```bash
-pip install certigen[all]
-```
-
-### Tesseract OCR (Required for auto-detection)
-
-- **Windows**: Download from [UB-Mannheim](https://github.com/UB-Mannheim/tesseract/wiki)
-- **macOS**: `brew install tesseract`
-- **Linux**: `sudo apt install tesseract-ocr`
 
 ## Quick Start
 
@@ -70,6 +61,13 @@ certigen -t template.png -e names.xlsx -f arial.ttf -p "John Doe" --pdf --zip
 # Find coordinates interactively
 certigen -t template.png --find-coords
 ```
+
+## How It Works
+
+1. **OCR Detection** - Scans your template to find the placeholder text (e.g., "John Doe")
+2. **Color Extraction** - Automatically detects text color and background color
+3. **Font Matching** - Estimates the font size from the placeholder
+4. **Generation** - Replaces placeholder with each name, auto-scaling for long names
 
 ## Advanced Usage
 
@@ -118,6 +116,23 @@ gen.email_certificates(
 )
 ```
 
+## Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `template_path` | Path to certificate template image | Required |
+| `excel_path` | Path to Excel/CSV file with names | Required |
+| `name_column` | Column name containing names | Required |
+| `font_path` | Path to .ttf font file | Required |
+| `placeholder` | Text to find and replace | "John Doe" |
+| `output_dir` | Output directory | "output" |
+| `font_color` | RGB tuple for text color | Auto-detected |
+| `bg_color` | RGB tuple for background | Auto-detected |
+| `manual_position` | (x, y) to override OCR | None |
+| `base_font_size` | Starting font size | 180 |
+| `min_font_size` | Minimum font size | 60 |
+| `verbose` | Print progress | True |
+
 ## CLI Options
 
 | Option | Description |
@@ -134,6 +149,16 @@ gen.email_certificates(
 | `--pdf` | Create combined PDF |
 | `--zip` | Create ZIP archive |
 | `--find-coords` | Interactive coordinate finder |
+
+## Changelog
+
+### v1.1.0
+- Replaced Tesseract with RapidOCR (no external dependencies!)
+- OCR now works out of the box with just `pip install`
+- Removed `tesseract_path` parameter
+
+### v1.0.0
+- Initial release
 
 ## License
 
