@@ -1,3 +1,6 @@
+⭐ If you find CertiGen useful, consider starring the repo!
+
+
 # CertiGen 🎓
 
 Automatic certificate generator with OCR-based placeholder detection. Generate hundreds of personalized certificates in seconds!
